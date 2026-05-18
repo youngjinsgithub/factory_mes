@@ -8,21 +8,24 @@
     - QR 스캔으로 트레이 인식
     - tbl_carrier_map에 BIND 등록 (S/N 생성)
     - 차종 비트(M250/M260) → 공정 A PLC(150)로 펄스 전송
-    - 공정 A PLC(150)의 B1160 폴링 → 공정 종료 감지 → tbl_robot_a INSERT
+    - PLC 160의 M1150 폴링 → tbl_robot_a 결과 기록
 
-  [PLC 구성 — 단일 PLC 150 접속]
-    PLC 150 (공정 A 메인): 차종 트리거 쓰기 (M250/M260) + 종료 신호 읽기 (B1160)
-    ※ 별도 관제 PLC 사용하지 않음 (PLC 150 한 곳에서 양방향 처리)
+  [PLC 구성 — 두 PLC 접속]
+    PLC 150 (공정 A 메인): 차종 트리거 쓰기 (M250/M260)
+    PLC 160 (관제):         M1150 (A 공정 종료 신호) 읽기
+    ※ 종료 신호 비트(M1150/M1130/M1120)는 모두 관제 PLC 160에 모여 있음
 
   [연결 구성]
     DB     : 192.168.3.141 (운영 서버, guest 계정)
-    PLC    : 192.168.3.150:1050 (공정 A)
+    PLC    : 192.168.3.150:2000 (공정 A)
+    PLC 관제: 192.168.3.160:2000 (종료 신호 모음)
     카메라 : QR 인식용 (인덱스 1)
 
   [전체 시스템 구조]
     공정 A: PLC 150 (작업 + 컨베어) — 펜던트 IF 자체 동작 ★
     공정 B: PLC 140 (메인) + PLC 130 (로봇/컨베어/종료) — 펜던트 IF
     공정 C: PLC 120 (메인) + PLC 110 (컨베어) — 펜던트 IF
+    관제:   PLC 160 (SCADA + 종료 신호 통합) — Vision PC가 종료 비트만 폴링
 ═══════════════════════════════════════════════════════════════════════
 """
 
@@ -50,22 +53,25 @@ DB_CONFIG = {
 }
 
 # ───── PLC 설정 ─────
-PLC_IP   = "192.168.3.150"   # 공정 A 메인 PLC (트리거 쓰기 + 종료 신호 읽기)
-PLC_PORT = 1050              # MC Protocol Open Setting 포트
+PLC_IP   = "192.168.3.150"   # 공정 A 메인 PLC (트리거 쓰기)
+PLC_PORT = 2000              # MC Protocol Open Setting 포트 (PLC 150 + 관제 PLC 160 공통)
+
+PLC_MONITOR_IP = "192.168.3.160"   # 관제 PLC (M1150 종료 신호 폴링)
 
 # ───── PLC 비트 정의 ─────
 # 쓰기 (Vision A → PLC 150)
 ADDR_RED  = "M250"   # 빨간차 시작 트리거
 ADDR_BLUE = "M260"   # 파란차 시작 트리거
 
-# 읽기 (PLC 150 → Vision A)
-ADDR_DONE_A = "B1160"   # 공정 A 종료 신호 (PLC 150 의 B1160 직접 폴링)
+# 읽기 (PLC 160 → Vision A)
+ADDR_DONE_A = "M1150"   # 공정 A 종료 신호 (관제 PLC 160에서 읽음)
 
 # ───── 카메라 설정 ─────
 CAMERA_INDEX = 1   # QR 카메라
 
-plc = None              # 공정 A PLC (트리거 쓰기 + 종료 신호 읽기)
-prev_done_a = False     # B1160 상승 엣지 감지용
+plc = None              # 공정 A PLC (트리거 쓰기)
+plc_monitor = None      # 관제 PLC 160 (종료 신호 폴링)
+prev_done_a = False     # M1150 상승 엣지 감지용
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -268,7 +274,7 @@ def show_active_status():
 # ═══════════════════════════════════════════════════════════════════════
 
 def connect_plc():
-    """공정 A PLC 150 연결 (트리거 쓰기 + 종료 신호 읽기)"""
+    """공정 A PLC 연결 (트리거 쓰기용)"""
     global plc
     try:
         plc = Type3E()
@@ -278,6 +284,20 @@ def connect_plc():
     except Exception as e:
         print(f"⚠ PLC 연결 실패 — 시뮬 모드 ({e})")
         plc = None
+        return False
+
+
+def connect_plc_monitor():
+    """관제 PLC 160 연결 (M1150 종료 신호 폴링용)"""
+    global plc_monitor
+    try:
+        plc_monitor = Type3E()
+        plc_monitor.connect(PLC_MONITOR_IP, PLC_PORT)
+        print(f"✅ 관제 PLC 연결 ({PLC_MONITOR_IP}:{PLC_PORT}) — 종료 신호 폴링")
+        return True
+    except Exception as e:
+        print(f"⚠ 관제 PLC 연결 실패 — 종료 폴링 비활성 ({e})")
+        plc_monitor = None
         return False
 
 
@@ -298,31 +318,31 @@ def trigger_plc(tray_type):
 
 
 def read_done_bit():
-    """공정 A 종료 비트 — PLC 150의 B1160 직접 읽기"""
-    if plc is None:
+    """공정 A 종료 비트 — 관제 PLC 160에서 읽기"""
+    if plc_monitor is None:
         return False
     try:
-        return bool(plc.batchread_bitunits(ADDR_DONE_A, 1)[0])
+        return bool(plc_monitor.batchread_bitunits(ADDR_DONE_A, 1)[0])
     except Exception:
         return False
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 공정 A 종료 신호 폴링 (상승 엣지 감지) — PLC 150의 B1160
+# 공정 A 종료 신호 폴링 (상승 엣지 감지) — PLC 160의 M1150
 # ═══════════════════════════════════════════════════════════════════════
 
 def monitor_process_a_completion():
-    """PLC 150 의 B1160 폴링해서 공정 A 종료 시 자동 DB 기록"""
+    """관제 PLC 160의 M1150 폴링해서 공정 A 종료 시 자동 DB 기록"""
     global prev_done_a
 
-    if plc is None:
+    if plc_monitor is None:
         return
 
     curr_done_a = read_done_bit()
 
     # 상승 엣지 감지
     if curr_done_a and not prev_done_a:
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 공정 A 종료 ({ADDR_DONE_A} ON, PLC 150)")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 공정 A 종료 ({ADDR_DONE_A} ON, PLC 160)")
         product_sn, tray_sn = get_latest_active_info()
         if product_sn:
             if record_robot_a_result(product_sn, tray_sn, 'OK'):
@@ -347,6 +367,7 @@ cv2.namedWindow('Process A - QR + Trigger (Pendant Mode)', cv2.WINDOW_NORMAL)
 cv2.resizeWindow('Process A - QR + Trigger (Pendant Mode)', 960, 720)
 
 connect_plc()
+connect_plc_monitor()
 
 last_decoded = ""
 
@@ -360,7 +381,7 @@ print("  공정 A — QR 스캐너 + 차종 트리거 (펜던트 IF 방식)")
 print("=" * 60)
 print("  [자동 동작]")
 print("    QR 갖다 대면 → carrier_map BIND + 차종 신호 PLC 150 전송")
-print(f"    {ADDR_DONE_A} 상승 엣지 (PLC 150) → tbl_robot_a INSERT")
+print(f"    {ADDR_DONE_A} 감지 (PLC 160) → tbl_robot_a INSERT")
 print("")
 print("  [수동 제어]")
 print("    R  : 가장 최근 ACTIVE 트레이 1개 RELEASE")
@@ -371,11 +392,12 @@ print("=" * 60)
 print("")
 print(f"  [DB 서버] {DB_CONFIG['host']}:{DB_CONFIG['port']}")
 print(f"  [PLC]     {PLC_IP}:{PLC_PORT} (공정 A 메인)")
+print(f"  [PLC 관제] {PLC_MONITOR_IP}:{PLC_PORT} (종료 신호 폴링)")
 print("")
 print("  [PLC 비트]")
 print(f"    {ADDR_RED}    : RED 차종 시작 펄스 (Vision → PLC 150)")
 print(f"    {ADDR_BLUE}    : BLUE 차종 시작 펄스 (Vision → PLC 150)")
-print(f"    {ADDR_DONE_A} : 공정 A 종료 (PLC 150 → Vision)")
+print(f"    {ADDR_DONE_A} : 공정 A 종료 (PLC 160 → Vision)")
 print("=" * 60)
 
 show_active_status()
@@ -443,7 +465,7 @@ while True:
 
             last_decoded = data
 
-    # ★ 매 프레임마다 공정 A 종료 폴링 (PLC 150의 B1160)
+    # ★ 매 프레임마다 공정 A 종료 폴링 (PLC 160의 M1150)
     monitor_process_a_completion()
 
     cv2.imshow('Process A - QR + Trigger (Pendant Mode)', display_frame)
@@ -476,6 +498,13 @@ if plc:
     try:
         plc.close()
         print("\n  PLC (150) 연결 종료")
+    except:
+        pass
+
+if plc_monitor:
+    try:
+        plc_monitor.close()
+        print("  관제 PLC (160) 연결 종료")
     except:
         pass
 
