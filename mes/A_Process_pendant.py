@@ -55,7 +55,7 @@ DB_CONFIG = {
 
 # ───── PLC 설정 ─────
 PLC_IP   = "192.168.3.150"   # 공정 A 메인 PLC (트리거 쓰기)
-PLC_PORT = 2000
+PLC_PORT = 1050   # MC Protocol Open Setting 포트 (PLC 150 + 관제 PLC 160 공통)
 
 PLC_MONITOR_IP = "192.168.3.160"   # 관제 PLC (M1150 종료 신호 폴링)
 
