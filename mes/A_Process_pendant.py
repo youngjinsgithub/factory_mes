@@ -16,7 +16,7 @@
     ※ 종료 신호 비트(M1150/M1130/M1120)는 모두 관제 PLC 160에 모여 있음
 
   [연결 구성]
-    DB     : 같은 노트북 (localhost, root)
+    DB     : 192.168.3.45 (운영 서버, guest 계정)
     PLC    : 192.168.3.150 (공정 A)
     PLC 관제: 192.168.3.160 (종료 신호 모음)
     카메라 : QR 인식용 (인덱스 1)
@@ -40,11 +40,12 @@ from pymcprotocol import Type3E
 # ═══════════════════════════════════════════════════════════════════════
 
 # ───── DB 서버 ─────
+# 운영 DB 서버 (192.168.3.45) — guest 계정
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': '192.168.3.45',
     'port': 3306,
-    'user': 'root',
-    'password': '1234',
+    'user': 'guest',
+    'password': 'guest1234',
     'db': 'faictory_mes',
     'charset': 'utf8mb4',
     'autocommit': True,

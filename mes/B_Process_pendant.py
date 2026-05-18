@@ -21,7 +21,7 @@
     Vision PC는 로봇과 직접 통신하지 않음. PLC가 모든 로봇 기동을 처리.
 
   [연결 구성]
-    DB     : 같은 노트북 (localhost, root)
+    DB     : 192.168.3.45 (운영 서버, guest 계정)
     PLC    : 192.168.3.140 (공정 B 메인)
              ※ 공정 B에는 PLC 130(로봇/컨베어/종료)도 있으나 PLC끼리 통신,
                Vision PC는 메인 PLC 140만 접속
@@ -58,12 +58,12 @@ from ultralytics import YOLO
 # ═══════════════════════════════════════════════════════════════════════
 
 # ───── DB 서버 ─────
-# 프로토타입 단계 — DB가 이 Vision PC와 같은 노트북에 있어 localhost + root 사용.
+# 운영 DB 서버 (192.168.3.45) — guest 계정
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': '192.168.3.45',
     'port': 3306,
-    'user': 'root',
-    'password': '1234',
+    'user': 'guest',
+    'password': 'guest1234',
     'db': 'faictory_mes',
     'charset': 'utf8mb4',
     'autocommit': True,

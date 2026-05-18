@@ -67,13 +67,12 @@ from ultralytics import YOLO
 # ═══════════════════════════════════════════════════════════════════════
 
 # ───── DB 서버 ─────
-# 프로토타입 단계 — DB가 이 Vision PC와 같은 노트북에 있어 localhost + root 사용.
-# 시연/실 운영으로 분리될 때 별도 계정(예: faictory_mes 전용 사용자) 생성 권장.
+# 운영 DB 서버 (192.168.3.45) — guest 계정
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': '192.168.3.45',
     'port': 3306,
-    'user': 'root',
-    'password': '1234',
+    'user': 'guest',
+    'password': 'guest1234',
     'db': 'faictory_mes',
     'charset': 'utf8mb4',
     'autocommit': True,

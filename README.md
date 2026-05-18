@@ -76,11 +76,13 @@ python mes/C_Process_pendant.py
 
 | 항목 | 주소 |
 |---|---|
-| DB | `localhost:3306` / root / 1234 / `faictory_mes` |
+| DB 서버 | `192.168.3.45:3306` / guest / guest1234 / `faictory_mes` |
 | 공정 A PLC | `192.168.3.150:2000` |
 | 공정 B PLC | `192.168.3.140:2000` |
 | 공정 C PLC | `192.168.3.120:2000` |
 | 관제 PLC 160 | `192.168.3.160:2000` |
+
+DB 셋업 + 계정 권한 부여는 [db/SETUP.md](db/SETUP.md) 참조.
 
 ## 🎯 비전 검사 — 3초 voting
 
