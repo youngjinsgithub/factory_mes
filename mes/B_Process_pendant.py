@@ -60,10 +60,10 @@ from ultralytics import YOLO
 # ───── DB 서버 ─────
 # 운영 DB 서버 (192.168.3.141) — guest 계정
 DB_CONFIG = {
-    'host': '192.168.3.141',
+    'host': '192.168.3.141',           # 🖥️ 서버 IP (고정)
     'port': 3306,
-    'user': 'guest',
-    'password': 'guest1234',
+    'user': 'guest',                   # 👤 모든 PC가 동일
+    'password': 'guest1234',           # 🔑 모든 PC가 동일
     'db': 'faictory_mes',
     'charset': 'utf8mb4',
     'autocommit': True,
