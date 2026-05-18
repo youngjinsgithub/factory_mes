@@ -1,4 +1,4 @@
-# FAiCTORY MES
+﻿# FAiCTORY MES
 
 부산 인텔 DX 부트캠프 — Indy7 협동로봇 + 미쓰비시 PLC + YOLO 비전 검사 기반 3공정 스마트팩토리 MES.
 
@@ -76,7 +76,7 @@ python mes/C_Process_pendant.py
 
 | 항목 | 주소 |
 |---|---|
-| DB 서버 | `192.168.3.45:3306` / guest / guest1234 / `faictory_mes` |
+| DB 서버 | `192.168.3.141:3306` / guest / guest1234 / `faictory_mes` |
 | 공정 A PLC | `192.168.3.150:2000` |
 | 공정 B PLC | `192.168.3.140:2000` |
 | 공정 C PLC | `192.168.3.120:2000` |

@@ -1,10 +1,10 @@
-# DB 설정 가이드
+﻿# DB 설정 가이드
 
 ## 1. 현재 운영 환경
 
 | 항목 | 값 |
 |---|---|
-| Host | `192.168.3.45` |
+| Host | `192.168.3.141` |
 | Port | `3306` |
 | User | `guest` |
 | Password | `guest1234` |
@@ -46,7 +46,7 @@ SHOW GRANTS FOR 'guest'@'%';
 ### 2-3. 접속 테스트
 
 ```bash
-mysql -h 192.168.3.45 -u guest -pguest1234 faictory_mes -e "SHOW TABLES;"
+mysql -h 192.168.3.141 -u guest -pguest1234 faictory_mes -e "SHOW TABLES;"
 ```
 
 위 명령으로 테이블 6개(`tbl_carrier_map`, `tbl_robot_a/b/c`, `tbl_tray_master`, `tbl_total`) 보이면 OK.
@@ -85,7 +85,7 @@ SELECT user, host FROM mysql.user WHERE user = 'guest';
 ```python
 import os
 DB_CONFIG = {
-    'host': os.environ.get('FAICTORY_DB_HOST', '192.168.3.45'),
+    'host': os.environ.get('FAICTORY_DB_HOST', '192.168.3.141'),
     'user': os.environ.get('FAICTORY_DB_USER', 'guest'),
     'password': os.environ['FAICTORY_DB_PASSWORD'],   # 필수
     'db': 'faictory_mes',
