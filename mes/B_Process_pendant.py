@@ -166,6 +166,64 @@ def record_robot_b_result(product_sn, tray_sn, vision_result, defect_type=None):
         return False
 
 
+def finalize_defect_at_b(product_sn):
+    """공정 B 불량 판정 시 → tbl_total UPSERT(NG) + carrier_map RELEASE.
+
+    공정 C 로 안 넘어가는 시나리오에서 트레이가 영원히 ACTIVE 로 묶이지 않게
+    B 단계에서 자체적으로 종합 처리 마무리.
+
+    1. tbl_robot_a (이전 공정 결과) 조회
+    2. tbl_robot_b 는 방금 INSERT 한 NG (자체 조회)
+    3. process_c 는 NULL (공정 C 안 거침)
+    4. final = NG (B 가 불량이므로 자동 NG)
+    5. tbl_total UPSERT + carrier_map RELEASE
+    """
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT vision_result FROM tbl_robot_a "
+                "WHERE product_sn = %s ORDER BY recorded_at DESC LIMIT 1",
+                (product_sn,)
+            )
+            row = cur.fetchone()
+            result_a = row[0] if row else None
+
+            cur.execute(
+                "SELECT vision_result FROM tbl_robot_b "
+                "WHERE product_sn = %s ORDER BY recorded_at DESC LIMIT 1",
+                (product_sn,)
+            )
+            row = cur.fetchone()
+            result_b = row[0] if row else 'NG'
+
+            result_c = None   # 공정 C 안 거침
+            final = 'NG'      # B 가 불량이라 자동 NG
+
+            cur.execute(
+                "INSERT INTO tbl_total "
+                "(product_sn, process_a, process_b, process_c, final_result, completed_at) "
+                "VALUES (%s, %s, %s, %s, %s, NOW()) "
+                "ON DUPLICATE KEY UPDATE "
+                "process_a=VALUES(process_a), process_b=VALUES(process_b), "
+                "process_c=VALUES(process_c), final_result=VALUES(final_result), "
+                "completed_at=VALUES(completed_at)",
+                (product_sn, result_a, result_b, result_c, final)
+            )
+
+            cur.execute(
+                "UPDATE tbl_carrier_map "
+                "SET status='RELEASED', released_at=NOW() "
+                "WHERE product_sn=%s AND status='ACTIVE'",
+                (product_sn,)
+            )
+        conn.close()
+        return final, result_a, result_b
+    except Exception as e:
+        print(f"  ❌ B 불량 종합 처리 에러: {e}")
+        return None, None, None
+
+
 def show_active_status():
     """현재 ACTIVE 트레이 조회"""
     try:
@@ -441,24 +499,43 @@ def monitor_plc_signals():
         last_annotated_frame = None
 
     # ───── M1130 상승 엣지 (PLC 160) → 공정 B 종료 → tbl_robot_b INSERT ─────
+    # 양품 → tbl_robot_b INSERT 만 (종합 처리는 공정 C 가 담당)
+    # 불량 → tbl_robot_b INSERT + tbl_total NG + carrier_map RELEASE (C 로 안 넘어감)
     if curr_done_b and not prev_done_b:
         product_sn, tray_sn = get_latest_active_info()
         sn_str = f"{product_sn} (Tray: {tray_sn})" if product_sn else "(ACTIVE S/N 없음)"
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 공정 B 종료 ({ADDR_DONE_B} ON, PLC 160) — {sn_str}")
 
-        # 공정 완료 → DB 적재. 비전 결과 있으면 그 결과로, 없으면 default 'OK'.
         if product_sn:
+            # 비전 결과로 INSERT (없으면 default 'OK' 로 양품 가정)
             if last_vision_result is not None:
                 vr = last_vision_result['vision_result']
                 dt = last_vision_result.get('defect_type')
-                if record_robot_b_result(product_sn, tray_sn, vr, dt):
-                    print(f"  ✅ tbl_robot_b INSERT: {product_sn} → {vr} (비전 결과 사용)")
             else:
-                if record_robot_b_result(product_sn, tray_sn, 'OK', None):
-                    print(f"  ✅ tbl_robot_b INSERT: {product_sn} → OK (비전 결과 없음 — default)")
+                vr, dt = 'OK', None
+                print(f"  ℹ 비전 결과 없음 — default OK 로 INSERT")
+
+            if record_robot_b_result(product_sn, tray_sn, vr, dt):
+                print(f"  ✅ tbl_robot_b INSERT: {product_sn} → {vr}")
+
+            # 양품/불량 분기
+            if vr == 'NG':
+                # 공정 B 불량 → C 로 안 넘어감 → B 에서 종합 처리 마무리
+                print(f"  ⚠ 불량 판정 — 공정 C 미진행 → B 에서 종합 처리")
+                final, ra, rb = finalize_defect_at_b(product_sn)
+                if final:
+                    print(f"  ✅ tbl_total INSERT (final={final}) + carrier_map RELEASE")
+                    print(f"     공정 A: {ra or '미실시'}, 공정 B: {rb}, 공정 C: 미실시")
+                else:
+                    print(f"  ❌ 종합 처리 실패 — carrier_map 수동 RELEASE 필요")
+            else:
+                # 양품 → C 로 넘어감 (C 의 M1120 이 최종 종합)
+                print(f"  ✓ 양품 — 공정 C 로 진행 (C 에서 최종 tbl_total + RELEASE)")
+
+            # 다음 사이클을 위해 비전 결과 정리
+            last_vision_result = None
         else:
             print(f"  ⚠ ACTIVE S/N 없음, INSERT 스킵")
-        print(f"  ℹ 종합 처리(tbl_total + RELEASE)는 공정 C에서 담당")
 
     prev_vision_trigger = curr_vision_trigger
     prev_done_b = curr_done_b
