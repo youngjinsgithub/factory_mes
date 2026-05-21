@@ -18,13 +18,13 @@
 | 공정 C PLC | `192.168.3.120:2000` (트리거 수신/양품·불량 통보) |
 | 관제 PLC 160 | `192.168.3.160:2000` (M1120 종료 신호 폴링) |
 | 카메라 | **Intel RealSense D435** (인덱스 미사용, `pyrealsense2`) |
-| YOLO 모델 | `6class_best.pt` (vision_test_done 검증 모델, 외부 절대 경로) |
+| YOLO 모델 | `C_Vision_6class.pt` (vision_test_done 검증 모델, `factory_mes/models/` 안에서 repo 관리) |
 
 ## 3. PLC 비트 매핑
 
 | 비트 | 방향 | 의미 |
 |---|---|---|
-| `B130` | PLC 120 → Vision | 비전 검사 시작 트리거 (공정 B → C B디바이스 매핑) |
+| `B1390` | PLC 120 → Vision | 비전 검사 시작 트리거 (공정 B → C B디바이스 매핑) |
 | `M250` | Vision → PLC 120 | 양품 통보 |
 | `M260` | Vision → PLC 120 | 불량 통보 |
 | `M1120` | PLC 160 → Vision | 공정 C 종료 신호 (관제 PLC 에서 통합 폴링) |
@@ -32,7 +32,7 @@
 ## 4. ⭐ Voting 다수결 (튀는 값 방지)
 
 ```
-B130 ON (상승 엣지)
+B1390 ON (상승 엣지)
   ↓
 [IGNORE_DURATION = 0.4s 안정화 대기]
   센서/조명 흔들림으로 인한 초기 쓰레기 데이터 무시
@@ -49,14 +49,14 @@ B130 ON (상승 엣지)
   ↓
 PLC 양품/불량 통보 + tbl_robot_c INSERT (사이클당 1회)
   ↓
-B130 OFF → ON 들어오면 다시 사이클 시작
+B1390 OFF → ON 들어오면 다시 사이클 시작
 ```
 
 ### 주요 상수
 
 | 상수 | 값 | 의미 |
 |---|---|---|
-| `IGNORE_DURATION` | `0.4` | B130 ON 직후 무시 시간 (s) |
+| `IGNORE_DURATION` | `0.4` | B1390 ON 직후 무시 시간 (s) |
 | `VOTING_DURATION` | `1.5` | voting 윈도우 (s) |
 | `INITIAL_CONF_THRESHOLD` | `0.50` | YOLO conf 초기값 (실행 중 트랙바로 조정) |
 
@@ -65,11 +65,11 @@ B130 OFF → ON 들어오면 다시 사이클 시작
 ```
    [공정 B 종료 + 컨베어 운반]
         │
-        ▼ B130 ON
+        ▼ B1390 ON
    PLC 120 트리거 수신
                                           ┌────────────────────────────┐
                                           │  Vision PC                 │
-                                          │  1) B130 상승 엣지 감지    │
+                                          │  1) B1390 상승 엣지 감지    │
                                           │  2) 0.4s 안정화 대기       │
                                           │  3) 검출 폴링              │
                                           │  4) 첫 검출 → 1.5s voting  │
@@ -143,10 +143,11 @@ USB 케이블 / 드라이버 (Intel RealSense SDK 2.0) 확인.
 ### D. "모델 경로 못 찾음"
 
 ```python
-MODEL_PATH = r"C:\Users\user\Desktop\intel_cam_prj\intel_cam\intel_cam\models\6class_best.pt"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'models', 'C_Vision_6class.pt')
 ```
 
-→ 이 절대 경로는 **개발 PC 전용**. 다른 PC 에 배포 시 경로 수정 또는 모델 파일 복사 필요.
+→ 이제 **repo 내부 상대 경로**. 어느 PC에서든 `factory_mes/` 만 clone 하면 동작.
+→ 모델 파일 동봉: `C_Vision_6class.pt` (PyTorch), `C_Vision_6class.onnx` (ONNX 백업), `C_Vision_6class_labels.txt` (라벨).
 
 ### E. "M250/M260 PLC 측에서 안 보임"
 - `test_plc_signal.py` 의 sweep 모드 (`s`) 로 M250 쓰기 가능한지 확인
@@ -157,8 +158,8 @@ MODEL_PATH = r"C:\Users\user\Desktop\intel_cam_prj\intel_cam\intel_cam\models\6c
 | 키 | 동작 |
 |---|---|
 | **V** | 비전 검사 수동 실행 (PLC 우회, 디버그) |
-| **1** | B130 ON (PLC B 트리거 흉내, 검출 폴링 시작) |
-| **0** | B130 OFF (재트리거 준비) |
+| **1** | B1390 ON (PLC B 트리거 흉내, 검출 폴링 시작) |
+| **0** | B1390 OFF (재트리거 준비) |
 | **S** | 현재 ACTIVE 트레이 조회 |
 | **Q** | 종료 |
 
@@ -183,9 +184,98 @@ python C_Process_pendant.py
 공정 C — 비전 검사 + 종합 처리 (펜던트 IF 방식)
 ```
 
-## 10. 관련 파일
+## 10. FPS 안정화 — PLC 폴링 백그라운드 분리 (히스토리)
+
+### 10.1 증상
+voting 적용 후 컨베이어 테스트에서 FPS가 갑자기 **0.5fps**까지 떨어지는 현상. 같은 코드인데 세션마다 결과가 달라짐 — voting 자체는 무관, 외부 요인(네트워크/PLC 응답) 의심.
+
+| 시도 | FPS | 비고 |
+|------|------|------|
+| 1차 (즉시 판정) | 검출 구간 24fps | 정상 동작 |
+| 2차 (voting 적용 후) | 0.5fps | 갑자기 죽음 |
+| 3차 (재실행) | 35fps | 우연히 정상 |
+| 4차 | 0.5fps | 재발 |
+
+### 10.2 진단 — 구간별 타이밍 로그
+메인 루프 각 단계 시간을 1초마다 출력:
+
+```python
+section_times = {'capture': 0.0, 'plc': 0.0, 'vision': 0.0, 'display': 0.0}
+# 매 프레임 _t0~_t4 측정 → 1초마다 구간별 평균 ms 출력
+```
+
+**범인 발견:**
+```
+[timing] capture=232.0ms | plc=2007.2ms | vision=1.0ms | display=2.0ms  (프레임 1장)
+```
+- PLC 폴링이 매 호출 **2초**(=mcprotocol TCP 타임아웃)
+- 메인 루프가 PLC 응답 기다리느라 0.5fps
+- YOLO/카메라/디스플레이는 모두 정상
+
+### 10.3 1차 시도 — Throttle (실패)
+PLC 폴링을 매 프레임이 아니라 100ms 간격으로만 호출:
+
+```python
+PLC_POLL_INTERVAL = 0.1
+if _t1 - last_plc_poll_at >= PLC_POLL_INTERVAL:
+    monitor_plc_signals()
+```
+
+**효과 없음:** throttle은 "호출 빈도"만 줄임. **개별 호출이 2초 블로킹**되는 문제는 해결 X.
+
+### 10.4 2차 시도 — 단일 백그라운드 스레드
+PLC IO를 별도 스레드로 분리. 메인 루프는 캐시만 read:
+
+```python
+plc_cache = {'vision_trigger': False, 'done_c': False}
+plc_cache_lock = threading.Lock()
+plc_lock = threading.Lock()           # 소켓 직렬화 (BG read vs 메인 write 충돌 방지)
+plc_monitor_lock = threading.Lock()
+
+def plc_polling_loop():
+    while not plc_thread_stop.is_set():
+        vt = read_plc_bit(ADDR_VISION_TRIGGER)   # PLC 120
+        dc = read_done_bit()                      # PLC 160
+        with plc_cache_lock:
+            plc_cache['vision_trigger'] = vt
+            plc_cache['done_c'] = dc
+```
+
+**효과:** 메인 FPS 30fps 회복. 진단으로 **PLC 120=3ms / PLC 160=2008ms** 확인 — 관제 PLC 160(M1120)이 범인.
+
+**남은 문제:** BG 스레드가 1개라 PLC 120 폴링도 PLC 160 뒤에 묶임 → B1390 트리거 감지 최대 2초 지연.
+
+### 10.5 3차 시도 (최종) — PLC별 스레드 분리
+각 PLC가 독립 소켓이므로 스레드도 분리:
+
+```python
+def plc_polling_loop_120():    # PLC 120 (B1390) — 빠른 응답, 50ms 주기
+def plc_polling_loop_160():    # PLC 160 (M1120) — 느려도 OK, 자기 페이스
+```
+
+**최종 결과:**
+```
+[timing] capture=23.6ms | plc=0.0ms | vision=1.0ms | display=0.9ms  (프레임 31장)
+[plc-bg] B1390(120)=3.2ms × 16/s | M1120(160)=0.0ms × 16/s
+```
+- 메인 FPS = **30fps 안정**
+- B1390 폴링 16~27Hz (50ms 응답성 보장)
+- M1120이 느려도 B1390 영향 없음
+- voting 결과: **47프레임 / 1.5s** 누적 → 다수결 100% 일관
+
+### 10.6 핵심 교훈
+- **외부 시스템(PLC/네트워크)을 메인 루프 동기 호출하지 말 것** — 응답 지연이 FPS 손실로 직결
+- **Throttle vs 비동기는 다름** — throttle은 호출 빈도만 줄임, 비동기(스레드)만 블로킹을 진짜 분리
+- **자원별로 스레드 분리** — 한 스레드에 빠른/느린 IO 섞으면 빠른 쪽도 느린 쪽에 묶임
+- **타이밍 로그 먼저** — 추측 X, 구간별 ms 단위로 측정 후 결정
+- **lock 두 종류 분리** — 캐시 lock(짧게 보호) vs 소켓 lock(IO 호출 전체 보호)
+
+---
+
+## 11. 관련 파일
 
 - [C_Process_pendant.py](C_Process_pendant.py) — 본 코드
+- `../models/C_Vision_6class.pt`, `.onnx`, `_labels.txt` — YOLO 가중치/라벨
 - [B_Process_pendant.py](B_Process_pendant.py), [B_Process_디버깅.md](B_Process_디버깅.md) — 인접 공정 (양품/불량 분기 다름)
 - [A_Process_pendant.py](A_Process_pendant.py) — 시작 공정 (QR 스캔)
 - [../db/schema.sql](../db/schema.sql), [../db/SETUP.md](../db/SETUP.md)

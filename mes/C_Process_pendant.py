@@ -97,7 +97,7 @@ PLC_MONITOR_IP = "192.168.3.160"   # 관제 PLC (M1120 종료 신호 폴링)
 
 # ───── PLC 비트 정의 ─────
 # 읽기 (PLC 120 → Vision C)
-ADDR_VISION_TRIGGER = "B130"    # 비전 검사 시작 트리거
+ADDR_VISION_TRIGGER = "B1390"    # 비전 검사 시작 트리거
                                 # 공정 B PLC(130)의 B120 ⟷ 공정 C PLC(120)의 B130
 
 # 읽기 (PLC 160 관제 → Vision C)
@@ -110,12 +110,14 @@ ADDR_CRACK     = "M260"     # 불량 신호 (PLC 래더가 인식 → 자체 분
 #    Vision PC는 양품/불량만 통보하고, 로봇 기동은 PLC 래더가 자체 처리.
 
 # ───── YOLO 모델 ─────
-# vision_test_done.py 에서 검증된 모델 — C_VISION.pt에서는 detection이 잘 안 되어 교체
-MODEL_PATH = r"C:\Users\user\Desktop\intel_cam_prj\intel_cam\intel_cam\models\6class_best.pt"
+# vision_test_done.py 에서 검증된 모델(원래 6class_best.pt)을 C_Process 전용으로 repo 내부에 복사 + 개명.
+# 동일 가중치, 경로만 factory_mes/models/C_Vision_6class.pt로 통일해서 git으로 관리.
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'models', 'C_Vision_6class.pt')
 # 초기 conf 임계값 — 실행 중 트랙바로 실시간 조정 가능
 INITIAL_CONF_THRESHOLD = 0.50
-NORMAL_CLASSES = ['r_normal', 'g_normal', 'b_normal']
-CRACK_CLASSES  = ['r_crack',  'g_crack',  'b_crack']
+# g_normal 은 현장 데이터에서 crack 으로 분류돼야 정확도가 높아 CRACK 으로 이동
+NORMAL_CLASSES = ['r_normal', 'b_normal']
+CRACK_CLASSES  = ['r_crack',  'g_crack',  'b_crack', 'g_normal']
 
 # B130 ON 직후 센서/조명 흔들림으로 인한 초기 쓰레기 데이터 무시 시간 (초)
 # 이 시간 경과 후부터 매 프레임 추론을 시작.
