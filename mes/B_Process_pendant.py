@@ -31,7 +31,7 @@
     관제 PLC: 192.168.3.160 (M1130 공정 B 종료 신호만 폴링)
     카메라 : 비전 검사용 (인덱스 0, cv2.VideoCapture)
     로봇 B : PLC가 자체 제어 (Vision PC 직접 접속 X)
-    모델   : best.pt (프로젝트 루트, 차체조립 검사 모델)
+    모델   : B_Vision.pt (프로젝트 루트, 차체조립 검사 모델)
 
   [PLC 간 신호 전달]
     공정 A 완료 → 공정 B 시작 트리거 = PLC 140 의 M101 (B-디바이스로 도착)
@@ -110,13 +110,13 @@ ADDR_CRACK     = "M260"     # 불량 신호 (PLC 래더가 인식 → 자체 분
 #    Vision PC는 양품/불량만 통보.
 
 # ───── YOLO 모델 ─────
-# B 전용 모델 (프로젝트 루트의 best.pt — 차체조립 검사 모델)
+# B 전용 모델 (프로젝트 루트의 B_Vision.pt — 차체조립 검사 모델)
 # 모델 출력 클래스: {0: 'b', 1: 'g', 2: 'r'} — 차체 부품 색상 3종
 # 클래스 매핑: b/r 은 정상 차종, g 는 불량 차종으로 분류 (시연용 규정).
 #   - b, r 검출 → 양품 (M250)
 #   - g 검출   → 불량 (M260, defect_type='g')
 #   - 미검출/타임아웃 → 불량 (M260, defect_type='no_detect')
-MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'best.pt')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'B_Vision.pt')
 # 초기 conf 임계값 — 실행 중 트랙바로 실시간 조정 가능
 INITIAL_CONF_THRESHOLD = 0.80
 NORMAL_CLASSES = ['b', 'r']   # 정상 차종 → 양품
@@ -141,7 +141,7 @@ DEFECT_CLASS_NAME = 'no_detect'   # 타임아웃 시 defect_type 컬럼에 들�
 CAMERA_INDEX = 0
 
 # 카메라 회전 보정 (카메라가 가로/세로로 마운트된 경우)
-# None : 회전 없음 ← best.pt 가 회전 없는 원본 영상으로 학습됨. 회전 적용하면 검출 실패.
+# None : 회전 없음 ← B_Vision.pt 가 회전 없는 원본 영상으로 학습됨. 회전 적용하면 검출 실패.
 # cv2.ROTATE_90_CLOCKWISE         : 시계방향 90°
 # cv2.ROTATE_90_COUNTERCLOCKWISE  : 반시계방향 90°
 # cv2.ROTATE_180                  : 180°

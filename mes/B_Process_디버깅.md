@@ -19,7 +19,7 @@
 | 관제 PLC 160 | `192.168.3.160:2000` (M1130 종료 신호 — 현재 로그용) |
 | 카메라 | `cv2.VideoCapture(index=0, CAP_DSHOW)` — MJPG 지원 시 1280x720, 미지원 시 640x480 YUY2 로 폴백 |
 | 카메라 회전 | **None** (모델이 회전 없는 원본 영상으로 학습됨 — 회전 적용 시 검출 실패) |
-| YOLO 모델 | `best.pt` (프로젝트 루트, **3 클래스**: `b`, `g`, `r`, 차체조립 검사용) |
+| YOLO 모델 | `B_Vision.pt` (프로젝트 루트, **3 클래스**: `b`, `g`, `r`, 차체조립 검사용) |
 | Python 환경 | `.venv39` (Python 3.9.13 + torch 1.10.2+cu102, GPU 사용) |
 
 ## 3. PLC 비트 매핑
@@ -177,7 +177,7 @@ WHERE product_sn='260520-RD-0001' AND status='ACTIVE';
 콘솔에 `상위 3: g=0.986` 식으로 conf 출력. 여기서 0 이면 모델이 정말 못 보는 것 → 카메라 시야/조명/모델 문제.
 
 ### F. "model 클래스 매핑이 이상함"
-`best.pt` 는 `color` 데이터셋(`/content/machineVisionRobotics/datasets/color/`)으로 학습된 **단색 영역 검출 모델**. 디테일 많은 객체는 conf 떨어짐.
+`B_Vision.pt` 는 `color` 데이터셋(`/content/machineVisionRobotics/datasets/color/`)으로 학습된 **단색 영역 검출 모델**. 디테일 많은 객체는 conf 떨어짐.
 
 | 단색 색상 | 정상 conf |
 |---|---|
