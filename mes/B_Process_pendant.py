@@ -116,7 +116,7 @@ ADDR_CRACK     = "M260"     # 불량 신호 (PLC 래더가 인식 → 자체 분
 #   - b, r 검출 → 양품 (M250)
 #   - g 검출   → 불량 (M260, defect_type='g')
 #   - 미검출/타임아웃 → 불량 (M260, defect_type='no_detect')
-MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'B_Vision.pt')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'B_Vision.pt')
 # 초기 conf 임계값 — 실행 중 트랙바로 실시간 조정 가능
 INITIAL_CONF_THRESHOLD = 0.80
 NORMAL_CLASSES = ['b', 'r']   # 정상 차종 → 양품
