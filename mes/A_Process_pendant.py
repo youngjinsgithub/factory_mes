@@ -7,11 +7,11 @@
   [이 PC의 역할]
     - QR 스캔으로 트레이 인식
     - tbl_carrier_map에 BIND 등록 (S/N 생성)
-    - 차종 비트(M250/M260) → 공정 A PLC(150)로 펄스 전송
+    - 차종 비트(M250/M260/M270) → 공정 A PLC(150)로 펄스 전송
     - PLC 160의 M1150 폴링 → tbl_robot_a 결과 기록
 
   [PLC 구성 — 두 PLC 접속]
-    PLC 150 (공정 A 메인): 차종 트리거 쓰기 (M250/M260)
+    PLC 150 (공정 A 메인): 차종 트리거 쓰기 (M250/M260/M270)
     PLC 160 (관제):         M1150 (A 공정 종료 신호) 읽기
     ※ 종료 신호 비트(M1150/M1130/M1120)는 모두 관제 PLC 160에 모여 있음
 
@@ -60,14 +60,15 @@ PLC_MONITOR_IP = "192.168.3.160"   # 관제 PLC (M1150 종료 신호 폴링)
 
 # ───── PLC 비트 정의 ─────
 # 쓰기 (Vision A → PLC 150)
-ADDR_RED  = "M250"   # 빨간차 시작 트리거
-ADDR_BLUE = "M260"   # 파란차 시작 트리거
+ADDR_RED   = "M250"   # 빨간차 시작 트리거
+ADDR_BLUE  = "M260"   # 파란차 시작 트리거
+ADDR_GREEN = "M270"   # 초록차 시작 트리거
 
 # 읽기 (PLC 160 → Vision A)
 ADDR_DONE_A = "M1150"   # 공정 A 종료 신호 (관제 PLC 160에서 읽음)
 
 # ───── 카메라 설정 ─────
-CAMERA_INDEX = 1   # QR 카메라
+CAMERA_INDEX = 0   # QR 카메라
 
 plc = None              # 공정 A PLC (트리거 쓰기)
 plc_monitor = None      # 관제 PLC 160 (종료 신호 폴링)
@@ -119,7 +120,7 @@ def generate_product_sn(tray_type):
     형식: YYMMDD-RD/BL-NNNN
     """
     today = datetime.now().strftime('%y%m%d')
-    type_code = 'RD' if tray_type == 'RED' else 'BL'
+    type_code = {'RED': 'RD', 'BLUE': 'BL', 'GREEN': 'GN'}.get(tray_type, '??')
     try:
         conn = pymysql.connect(**DB_CONFIG)
         with conn.cursor() as cur:
@@ -172,21 +173,21 @@ def get_latest_active_info():
         return (None, None)
 
 
-def record_robot_a_result(product_sn, tray_sn, vision_result='OK', defect_type=None):
-    """공정 A 완료 → tbl_robot_a INSERT"""
+def record_robot_a_result(product_sn, tray_sn):
+    """공정 A 기록 → A_Process INSERT"""
     try:
         conn = pymysql.connect(**DB_CONFIG)
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO tbl_robot_a "
-                "(product_sn, machine_name, recorded_at, tray_sn, vision_result, defect_type) "
-                "VALUES (%s, %s, NOW(), %s, %s, %s)",
-                (product_sn, 'RobotA_Indy7', tray_sn, vision_result, defect_type)
+                "INSERT INTO A_Process "
+                "(product_sn, machine_name, recorded_at, tray_sn) "
+                "VALUES (%s, %s, NOW(), %s)",
+                (product_sn, 'RobotA_Indy7', tray_sn)
             )
         conn.close()
         return True
     except Exception as e:
-        print(f"  ❌ robot_a INSERT 에러: {e}")
+        print(f"  ❌ A_Process INSERT 에러: {e}")
         return False
 
 
@@ -306,7 +307,10 @@ def trigger_plc(tray_type):
     if plc is None:
         print(f"  [시뮬] PLC 없음 — '{tray_type}' 가상 전송")
         return
-    addr = ADDR_RED if tray_type == 'RED' else ADDR_BLUE
+    addr = {'RED': ADDR_RED, 'BLUE': ADDR_BLUE, 'GREEN': ADDR_GREEN}.get(tray_type)
+    if addr is None:
+        print(f"  ⚠ 알 수 없는 차종: {tray_type}")
+        return
     try:
         plc.batchwrite_bitunits(addr, [1])
         print(f"  [PLC] {addr} ON")
@@ -345,8 +349,8 @@ def monitor_process_a_completion():
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 공정 A 종료 ({ADDR_DONE_A} ON, PLC 160)")
         product_sn, tray_sn = get_latest_active_info()
         if product_sn:
-            if record_robot_a_result(product_sn, tray_sn, 'OK'):
-                print(f"  ✅ tbl_robot_a INSERT: {product_sn} (Tray: {tray_sn})")
+            if record_robot_a_result(product_sn, tray_sn):
+                print(f"  ✅ A_Process INSERT: {product_sn} (Tray: {tray_sn})")
         else:
             print(f"  ⚠ ACTIVE S/N 없음, INSERT 스킵")
 
@@ -397,6 +401,7 @@ print("")
 print("  [PLC 비트]")
 print(f"    {ADDR_RED}    : RED 차종 시작 펄스 (Vision → PLC 150)")
 print(f"    {ADDR_BLUE}    : BLUE 차종 시작 펄스 (Vision → PLC 150)")
+print(f"    {ADDR_GREEN}    : GREEN 차종 시작 펄스 (Vision → PLC 150)")
 print(f"    {ADDR_DONE_A} : 공정 A 종료 (PLC 160 → Vision)")
 print("=" * 60)
 
@@ -459,6 +464,8 @@ while True:
 
             if register_carrier_mapping(data, product_sn):
                 print(f"  ✅ tbl_carrier_map INSERT 완료")
+                if record_robot_a_result(product_sn, data):
+                    print(f"  ✅ A_Process INSERT 완료")
                 trigger_plc(tray_type)
             else:
                 print(f"  ❌ INSERT 실패")
