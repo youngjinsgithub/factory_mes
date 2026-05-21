@@ -5,10 +5,10 @@
 ═══════════════════════════════════════════════════════════════════════
 
   [이 PC의 역할]
-    - M101 트리거 감지 → 비전 검사 자동 실행 (YOLO Voting 다수결)
+    - B150 트리거 감지 → 비전 검사 자동 실행 (YOLO Voting 다수결)
     - 양품/불량 판정 → 공정 B PLC로 결과 통보 (M250/M260)
     - M101 ON 후 DEFECT_TIMEOUT 안에 양품 미판정 → 불량 처리 (M260)
-    - 비전 결과는 메모리에 보관, M1130(공정 B 종료) 시 B_Process INSERT
+    - 비전 결과는 메모리에 보관, B1790(공정 A 종료) 시 B_Process INSERT
     - 불량 시 finalize_defect_at_b 로 tbl_total + carrier_map RELEASE 직접 처리
     - 양품 시 공정 C 가 최종 종합 처리
 
@@ -24,18 +24,19 @@
 
   [연결 구성]
     DB     : 192.168.3.141 (운영 서버, guest 계정)
-    PLC    : 192.168.3.140 (공정 B 메인 — 트리거 수신 + 양품/불량 통보)
-             ※ M101(트리거) + M101(부품 도착) 폴링, M250/M260 양품/불량 통보
+    PLC    : 192.168.3.140 (공정 B 메인 — 모든 read/write 단일 접속)
+             ※ B150(트리거) + M101(부품 도착) + B1790(공정 A 종료) 모두 PLC 140 에서 폴링
              ※ 공정 B에는 PLC 130(로봇/컨베어/종료)도 있으나 PLC끼리 통신,
                Vision PC는 메인 PLC 140만 접속
-    관제 PLC: 192.168.3.160 (M1130 공정 B 종료 신호만 폴링)
     카메라 : 비전 검사용 (인덱스 0, cv2.VideoCapture)
     로봇 B : PLC가 자체 제어 (Vision PC 직접 접속 X)
     모델   : best.pt (프로젝트 루트, 차체조립 검사 모델)
 
-  [PLC 간 신호 전달]
-    공정 A 완료 → 공정 B 시작 트리거 = PLC 140 의 M101 (B-디바이스로 도착)
-    공정 B PLC(140)의 B120 ⟷ 공정 C PLC(120)의 B140 (공정 B→C 트리거, 이 코드와 무관)
+  [B 디바이스 통신 - PLC 간 신호 전달]
+    공정 A PLC(150)의 B140(="140으로 보낸다")
+      ⟷ 공정 B PLC(140)의 B150(="150에서 받았다")
+    공정 B PLC(140)의 B120(="120으로 보낸다")
+      ⟷ 공정 C PLC(120)의 B140 (공정 B→C 트리거, 이 코드와 무관)
 
   [전체 시스템 구조]
     공정 A: PLC 150 (작업 + 컨베어) — 펜던트 IF 자체 동작
@@ -44,16 +45,16 @@
     관제:   PLC 160 (SCADA용, Vision PC 직접 접속 X)
 
   [비전 판정 방식 — Voting 다수결 (공정 C 와 동일) + M101 타임아웃 안전망]
-    M101 ON → IGNORE_DURATION(0.4s) 안정화 대기 → 매 프레임 추론
+    B150 ON → IGNORE_DURATION(0.4s) 안정화 대기 → 매 프레임 추론
     첫 검출 시점부터 VOTING_DURATION(1.5s) 동안 결과 누적
     다수결로 최종 클래스 채택 → 양품 판정 → M250 즉시 통보 + 메모리 저장
     M101 ON 후 DEFECT_TIMEOUT(3.0s) 안에 양품 미판정 → 불량 → M260 통보
-    M1130 ON → 메모리 결과로 B_Process INSERT (+ NG면 finalize_defect_at_b)
-    M101 OFF → ON 다시 들어오면 잠금 해제 → 재트리거 가능
+    B1790 ON → 메모리 결과로 B_Process INSERT (+ NG면 finalize_defect_at_b)
+    B150 OFF → ON 다시 들어오면 잠금 해제 → 재트리거 가능
 
   [B 와 C 의 차이 — 같은 비전 로직, 다른 DB 타이밍]
     공정 C : voting 완료 즉시 PLC + C_Process INSERT (사이클 단발성)
-    공정 B : voting 완료 즉시 PLC, DB INSERT 는 M1130(공정 B 종료) 시점에 수행
+    공정 B : voting 완료 즉시 PLC, DB INSERT 는 B1790(공정 A 종료) 시점에 수행
              (PLC 작업이 끝난 뒤 결과 확정 — A_Process 와 동일한 패턴)
 ═══════════════════════════════════════════════════════════════════════
 """
@@ -89,19 +90,16 @@ DB_CONFIG = {
 }
 
 # ───── PLC 설정 ─────
-PLC_IP   = "192.168.3.140"   # 공정 B 메인 PLC (트리거 수신/통보)
+PLC_IP   = "192.168.3.140"   # 공정 B 메인 PLC (모든 read/write 단일 접속)
 PLC_PORT = 2000
 
-PLC_MONITOR_IP = "192.168.3.160"   # 관제 PLC (M1130 공정 B 종료 신호 폴링)
-
 # ───── PLC 비트 정의 ─────
-# 읽기 (PLC 140 → Vision B)
-# 비전 트리거와 부품 도착이 같은 비트 M101 로 통합됨 — M101 ON 이 곧 비전 시작이자 타임아웃 카운트 기준.
-ADDR_VISION_TRIGGER = "M101"    # 비전 검사 시작 트리거 (= 부품 도착 신호)
-ADDR_PART_PRESENT   = "M101"    # 부품 도착 신호 — DEFECT_TIMEOUT 기준점 (위 트리거와 동일 비트)
-
-# 읽기 (PLC 160 관제 → Vision B)
-ADDR_DONE_B         = "M1130"   # 공정 B 종료 신호 (관제 PLC 160에서 읽음)
+# 읽기 (PLC 140 → Vision B) — 단일 PLC 에서 3비트 모두 폴링
+ADDR_VISION_TRIGGER = "B150"    # 비전 검사 시작 트리거
+                                # 공정 A PLC(150)의 B140 ⟷ 공정 B PLC(140)의 B150
+ADDR_PART_PRESENT   = "M101"    # 부품 도착 신호 (여자 시 ON) — 비전 검출 기대 시작점.
+                                # ON 후 DEFECT_TIMEOUT 안에 양품 판정 없으면 불량(M260) 처리.
+ADDR_DONE_A         = "B1130"   # 공정 A 종료 신호 (PLC 140 의 B-디바이스로 들어옴)
 
 # 쓰기 (Vision B → PLC 140)
 ADDR_NORMAL    = "M250"     # 양품 신호 (PLC 래더가 인식 → 자체 분기 처리)
@@ -112,17 +110,14 @@ ADDR_CRACK     = "M260"     # 불량 신호 (PLC 래더가 인식 → 자체 분
 # ───── YOLO 모델 ─────
 # B 전용 모델 (프로젝트 루트의 best.pt — 차체조립 검사 모델)
 # 모델 출력 클래스: {0: 'b', 1: 'g', 2: 'r'} — 차체 부품 색상 3종
-# 클래스 매핑: b/r 은 정상 차종, g 는 불량 차종으로 분류 (시연용 규정).
-#   - b, r 검출 → 양품 (M250)
-#   - g 검출   → 불량 (M260, defect_type='g')
-#   - 미검출/타임아웃 → 불량 (M260, defect_type='no_detect')
+# 차체조립 공정은 불량 클래스가 없으므로 검출된 b/g/r 전부 양품으로 매핑.
 MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'best.pt')
 # 초기 conf 임계값 — 실행 중 트랙바로 실시간 조정 가능
-INITIAL_CONF_THRESHOLD = 0.80
-NORMAL_CLASSES = ['b', 'r']   # 정상 차종 → 양품
-CRACK_CLASSES  = ['g']        # 불량 차종 → M260 펄스 + finalize_defect_at_b
+INITIAL_CONF_THRESHOLD = 0.50
+NORMAL_CLASSES = ['b', 'g', 'r']   # 차체조립 — 세 부품 모두 정상 (양품 매핑)
+CRACK_CLASSES  = []                # 차체조립에는 불량 클래스 없음 (M260 경로 미사용)
 
-# M101 ON 직후 센서/조명 흔들림으로 인한 초기 쓰레기 데이터 무시 시간 (초)
+# B150 ON 직후 센서/조명 흔들림으로 인한 초기 쓰레기 데이터 무시 시간 (초)
 # 이 시간 경과 후부터 매 프레임 추론을 시작.
 IGNORE_DURATION = 0.4
 
@@ -141,31 +136,30 @@ DEFECT_CLASS_NAME = 'no_detect'   # 타임아웃 시 defect_type 컬럼에 들�
 CAMERA_INDEX = 0
 
 # 카메라 회전 보정 (카메라가 가로/세로로 마운트된 경우)
-# None : 회전 없음 ← best.pt 가 회전 없는 원본 영상으로 학습됨. 회전 적용하면 검출 실패.
+# None : 회전 없음
 # cv2.ROTATE_90_CLOCKWISE         : 시계방향 90°
 # cv2.ROTATE_90_COUNTERCLOCKWISE  : 반시계방향 90°
 # cv2.ROTATE_180                  : 180°
-CAMERA_ROTATION = None
+CAMERA_ROTATION = cv2.ROTATE_90_COUNTERCLOCKWISE
 
-plc = None              # 공정 B PLC 140 (트리거 수신/통보)
-plc_monitor = None      # 관제 PLC 160 (M1130 종료 신호 폴링)
+plc = None              # 공정 B PLC 140 (모든 read/write 단일 접속)
 yolo_model = None
 
 # 폴링용 이전 상태 (상승 엣지 감지)
 prev_vision_trigger = False
-prev_done_b = False
+prev_done_a = False
 prev_part_present = False
 
 # M101 ON 타임스탬프 — 0.0 이면 OFF 상태 또는 아직 ON 안 됨.
-# M101 OFF→ON 또는 M101 OFF→ON 에서 갱신, 양품 판정/M101 OFF/M101 OFF 에서 리셋.
+# B150 OFF→ON 또는 M101 OFF→ON 에서 갱신, 양품 판정/M101 OFF/B150 OFF 에서 리셋.
 part_present_on_time = 0.0
 
 # 검출 상태 — Voting 판정 모드
-# M101 상승 엣지 → trigger_on_time 갱신 + voting/잠금 상태 초기화
+# B150 상승 엣지 → trigger_on_time 갱신 + voting/잠금 상태 초기화
 # IGNORE_DURATION 경과 후 매 프레임 추론 시도
 # 첫 검출 발생 → voting_started_at 기록 + voting_buffer 에 결과 누적 시작
 # VOTING_DURATION 경과 → 다수결로 최종 클래스 결정 → PLC 통보 + 메모리 저장
-# M101 하강 후 다시 ON 시 새 사이클 시작
+# B150 하강 후 다시 ON 시 새 사이클 시작
 trigger_on_time = 0.0
 result_sent_this_cycle = False
 last_view_frame = None        # cv2 창에 표시할 최근 어노테이션 프레임
@@ -187,25 +181,21 @@ current_fps = 0.0
 # PLC 백그라운드 폴링 — PLC 네트워크 지연이 메인 루프 FPS 를 죽이는 문제 해결.
 # 별도 스레드가 PLC 를 지속적으로 read → 캐시 갱신, 메인 루프는 캐시만 read (O(1)).
 plc_lock = threading.Lock()           # plc (140) 소켓 직렬화 (BG read + 메인 write 충돌 방지)
-plc_monitor_lock = threading.Lock()   # plc_monitor (160) 소켓 직렬화
 plc_cache = {
-    'vision_trigger': False,   # M101 — BG 스레드(PLC 140)가 갱신
+    'vision_trigger': False,   # B150 — BG 스레드(PLC 140)가 갱신
     'part_present': False,     # M101 — BG 스레드(PLC 140)가 갱신
-    'done_b': False,           # M1130 공정 B 종료 — BG 스레드(PLC 160)가 갱신
+    'done_a': False,           # B1790 공정 A 종료 — BG 스레드(PLC 140)가 갱신
     'last_update_at': 0.0,
 }
 plc_cache_lock = threading.Lock()
 plc_thread_stop = threading.Event()
 PLC_POLL_TARGET_INTERVAL = 0.05       # BG 스레드 목표 폴링 주기 (20Hz). PLC가 느리면 자연 throttle.
 
-# BG 스레드 진단용 — 직전 1초 동안 각 PLC read 평균 시간 + 폴링 횟수
-# PLC 140 한 사이클당 M101 비트 read (트리거 + 부품 도착 통합) 시간을 trigger_* 에 누적.
-# PLC 160 M1130 1비트 read 시간을 done_* 에 누적.
+# BG 스레드 진단용 — 직전 1초 동안 PLC 140 read 평균 시간 + 폴링 횟수
+# 한 사이클당 B150 + M101 + B1790 3비트 read 총 시간을 누적.
 plc_poll_diag = {
     'trigger_total_ms': 0.0,
     'trigger_count': 0,
-    'done_total_ms': 0.0,
-    'done_count': 0,
 }
 plc_poll_diag_lock = threading.Lock()
 
@@ -218,7 +208,7 @@ section_times = {'capture': 0.0, 'plc': 0.0, 'vision': 0.0, 'display': 0.0}
 section_counts = {'capture': 0, 'plc': 0, 'vision': 0, 'display': 0}
 last_timing_print = time.time()
 
-# 사이클 누적 카운터 — M101 ON→OFF 한 사이클 동안 통계 수집
+# 사이클 누적 카운터 — B150 ON→OFF 한 사이클 동안 통계 수집
 cycle_total_frames = 0          # 안정화 이후 추론된 총 프레임
 cycle_detect_frames = 0         # 그 중 검출 성공 프레임 수
 cycle_class_counter = Counter() # 검출된 클래스 분포
@@ -369,39 +359,14 @@ def connect_plc():
         return False
 
 
-def connect_plc_monitor():
-    """관제 PLC 160 연결 (M1130 종료 신호 폴링용)"""
-    global plc_monitor
-    try:
-        plc_monitor = Type3E()
-        plc_monitor.connect(PLC_MONITOR_IP, PLC_PORT)
-        print(f"✅ 관제 PLC 연결 ({PLC_MONITOR_IP}:{PLC_PORT}) — 종료 신호 폴링")
-        return True
-    except Exception as e:
-        print(f"⚠ 관제 PLC 연결 실패 — 종료 폴링 비활성 ({e})")
-        plc_monitor = None
-        return False
-
-
 def read_plc_bit(addr):
-    """공정 B PLC(140) 비트 1개 읽기 — 트리거/부품 도착 비트용. plc_lock 으로 BG/메인 write 직렬화."""
+    """공정 B PLC(140) 비트 1개 읽기. plc_lock 으로 BG/메인 write 직렬화."""
     if plc is None:
         return False
     with plc_lock:
         try:
             result = plc.batchread_bitunits(addr, 1)
             return bool(result[0])
-        except Exception:
-            return False
-
-
-def read_done_bit():
-    """공정 B 종료 비트 — 관제 PLC 160 의 M1130 읽기. plc_monitor_lock 으로 직렬화."""
-    if plc_monitor is None:
-        return False
-    with plc_monitor_lock:
-        try:
-            return bool(plc_monitor.batchread_bitunits(ADDR_DONE_B, 1)[0])
         except Exception:
             return False
 
@@ -436,24 +401,28 @@ def send_vision_result_to_plc(is_normal):
 
 
 def plc_polling_loop_140():
-    """PLC 140 (M101 비전 트리거 + M101 부품 도착) 폴링 스레드 — 빠른 응답 우선.
+    """PLC 140 폴링 스레드 — 3비트(B150 + M101 + B1790) 통합 폴링.
 
-    공정 B 메인 PLC. M101 상승 엣지 감지 지연이 voting 시작 타이밍을,
-    M101 상승 엣지 감지 지연이 불량 타임아웃 시작 타이밍을 결정.
-    M1130(공정 B 종료) 폴링과 분리해서 한쪽이 느려도 다른쪽 영향 X.
+    공정 B 메인 PLC 단일 접속으로 다음 비트를 모두 읽음:
+      B150 : 비전 트리거 (voting 시작 타이밍 결정)
+      M101 : 부품 도착 (불량 타임아웃 시작점)
+      B1790: 공정 A 종료 신호 (B_Process INSERT 트리거)
 
-    트리거와 부품 도착이 같은 M101 비트로 통합돼서 BG 스레드는 사실상 한 비트만 폴링.
+    셋 다 다른 디바이스 영역(B/M)이라 batch read 불가 → 3회 순차 read.
+    측정 시 1회 read 가 너무 느리면 PLC_POLL_TARGET_INTERVAL 조정.
     """
     while not plc_thread_stop.is_set():
         loop_start = time.time()
         t0 = time.time()
-        # 비전 트리거와 부품 도착이 같은 M101 비트 → 한 번 read 후 양쪽 캐시에 저장
-        m101_val = read_plc_bit(ADDR_VISION_TRIGGER)
+        vt = read_plc_bit(ADDR_VISION_TRIGGER)
+        pp = read_plc_bit(ADDR_PART_PRESENT)
+        da = read_plc_bit(ADDR_DONE_A)
         t1 = time.time()
 
         with plc_cache_lock:
-            plc_cache['vision_trigger'] = m101_val
-            plc_cache['part_present'] = m101_val
+            plc_cache['vision_trigger'] = vt
+            plc_cache['part_present'] = pp
+            plc_cache['done_a'] = da
             plc_cache['last_update_at'] = t1
 
         with plc_poll_diag_lock:
@@ -466,33 +435,8 @@ def plc_polling_loop_140():
             plc_thread_stop.wait(remaining)
 
 
-def plc_polling_loop_160():
-    """관제 PLC 160 (M1130 공정 B 종료 신호) 폴링 스레드 — 응답 느려도 무방.
-
-    M1130 은 long-lived 종료 신호라 폴링 주기가 길어도 동작에 영향 없음.
-    별도 스레드로 분리해 PLC 140 폴링(트리거/부품 도착)이 영향받지 않도록 함.
-    """
-    while not plc_thread_stop.is_set():
-        loop_start = time.time()
-        t0 = time.time()
-        da = read_done_bit()
-        t1 = time.time()
-
-        with plc_cache_lock:
-            plc_cache['done_b'] = da
-
-        with plc_poll_diag_lock:
-            plc_poll_diag['done_total_ms'] += (t1 - t0) * 1000.0
-            plc_poll_diag['done_count'] += 1
-
-        elapsed = time.time() - loop_start
-        remaining = PLC_POLL_TARGET_INTERVAL - elapsed
-        if remaining > 0:
-            plc_thread_stop.wait(remaining)
-
-
-def set_vision_trigger(val):
-    """M101 을 ON(1) 또는 OFF(0) 으로 직접 설정.
+def set_b150(val):
+    """B150 을 ON(1) 또는 OFF(0) 으로 직접 설정.
 
     공정 A PLC(150)가 보내는 시작 트리거를 흉내내는 수동 도구.
     val=1(ON) 후 monitor_plc_signals() 의 상승 엣지 감지가 동작하여
@@ -517,25 +461,12 @@ def set_vision_trigger(val):
 # ═══════════════════════════════════════════════════════════════════════
 
 def load_yolo_model():
-    """YOLO 모델 로드 — CUDA 사용 가능하면 GPU 로 이동 + dummy 추론 2회로 warmup.
-    Warmup 안 하면 첫 실제 추론에 CUDA JIT 컴파일 ~2초 소요 → voting 시작 직후
-    M101 타임아웃 발동 가능. 시작 시 미리 풀어두면 첫 사이클부터 15ms.
-    """
+    """YOLO 모델 로드"""
     global yolo_model
     print(f"[INFO] 모델 로딩 중: {MODEL_PATH}")
     try:
-        import torch
         yolo_model = YOLO(MODEL_PATH)
-        if torch.cuda.is_available():
-            yolo_model.to('cuda')
-            print(f"✅ YOLO 모델 로드 완료 (GPU: {torch.cuda.get_device_name(0)})")
-            # Warmup — dummy 프레임 2회 추론으로 CUDA JIT 컴파일 미리 끝내기
-            dummy = np.zeros((480, 640, 3), dtype=np.uint8)
-            for _ in range(2):
-                yolo_model(dummy, verbose=False)
-            print(f"✅ GPU warmup 완료 — 첫 사이클부터 fast inference")
-        else:
-            print(f"✅ YOLO 모델 로드 완료 (CPU — CUDA 미사용)")
+        print(f"✅ YOLO 모델 로드 완료")
         print(f"  클래스: {yolo_model.names}")
         return True
     except Exception as e:
@@ -549,13 +480,9 @@ def on_trackbar(_val):
 
 
 def get_current_conf_threshold():
-    """트랙바에서 현재 conf 임계값 (0.0~1.0). 창 닫혀있으면 초기값 반환."""
-    try:
-        val = cv2.getTrackbarPos(TRACKBAR_NAME, WINDOW_NAME)
-        return val / 100.0
-    except cv2.error:
-        # 사용자가 X 버튼으로 창을 닫은 직후 호출되는 경우 — 종료 절차 진행 중이므로 안전값 반환
-        return INITIAL_CONF_THRESHOLD
+    """트랙바에서 현재 conf 임계값 (0.0~1.0)"""
+    val = cv2.getTrackbarPos(TRACKBAR_NAME, WINDOW_NAME)
+    return val / 100.0
 
 
 def vision_inspect(frame, conf_thresh):
@@ -606,73 +533,46 @@ def vision_inspect(frame, conf_thresh):
                 'is_normal': None, 'annotated_frame': frame}
 
 
-def _insert_robot_b_now(is_normal, defect_class):
-    """voting/타임아웃 결과 → B_Process 즉시 INSERT + NG 시 finalize_defect_at_b.
-
-    공정 C 와 동일 패턴 — 비전 판정 직후 DB 적재 (M1130 신호 기다리지 않음).
-    """
-    product_sn, tray_sn = get_latest_active_info()
-    if not product_sn:
-        print(f"  ⚠ ACTIVE S/N 없음, DB 기록 스킵")
-        return
-    vision_result = 'OK' if is_normal else 'NG'
-    defect_type = None if is_normal else defect_class
-    if record_robot_b_result(product_sn, tray_sn, vision_result, defect_type):
-        print(f"  ✅ B_Process INSERT: {product_sn} → {vision_result}")
-    if not is_normal:
-        # NG → 공정 C 미진행 → B 에서 종합 처리 마무리 (tbl_total + carrier_map RELEASE)
-        print(f"  ⚠ 불량 판정 — 공정 C 미진행 → B 에서 종합 처리")
-        final, ra, rb = finalize_defect_at_b(product_sn)
-        if final:
-            print(f"  ✅ tbl_total INSERT (final={final}) + carrier_map RELEASE")
-            print(f"     공정 A: {ra or '미실시'}, 공정 B: {rb}, 공정 C: 미실시")
-        else:
-            print(f"  ❌ 종합 처리 실패 — carrier_map 수동 RELEASE 필요")
-
-
 def commit_inspection_result(is_normal, class_name):
-    """판정 결과 처리 — PLC 통보 + B_Process INSERT (즉시, 공정 C 동일 패턴).
+    """판정 결과 처리 — PLC 즉시 통보 + 비전 결과 메모리 저장.
 
-    voting 완료 시점에 바로 DB 적재. M1130 신호 기다리지 않음.
-    NG 면 finalize_defect_at_b 까지 한 번에 처리.
+    공정 C 와 달리 B 는 DB INSERT 를 M1130 종료 신호 시점에 수행.
+    여기서는 PLC 양품/불량 펄스만 보내고, 결과는 last_vision_result 에 보관.
     """
     global last_vision_result
 
     judgment = "양품 ✅" if is_normal else "불량 ❌"
     print(f"  ⚡ [voting 판정] 채택 클래스: {class_name} → {judgment}")
 
-    # 1. PLC 양품/불량 통보 (M250/M260 펄스)
+    # 1. PLC 양품/불량 통보 (로봇 기동은 PLC 자체 센서/래더가 처리)
     send_vision_result_to_plc(is_normal)
 
-    # 2. B_Process 즉시 INSERT (+ NG 면 종합 처리)
-    _insert_robot_b_now(is_normal, class_name)
-
-    # 3. 메모리에도 저장 (디버그/표시용)
+    # 2. 비전 결과를 메모리에 저장 — 실제 DB INSERT 는 M1130 시점에 수행
     vision_result = 'OK' if is_normal else 'NG'
+    defect_type = None if is_normal else class_name
     last_vision_result = {
         'vision_result': vision_result,
-        'defect_type': None if is_normal else class_name,
+        'defect_type': defect_type
     }
-
-
-def _commit_detection_failure(reason):
-    """비전 검출 실패 통합 처리 — M260 펄스 + B_Process NG INSERT + finalize_defect_at_b(release).
-
-    호출되는 케이스:
-      1. M101 ON 후 DEFECT_TIMEOUT 안에 양품 voting 미완료
-      2. voting 완료했지만 알 수 없는 클래스 (NORMAL_CLASSES/CRACK_CLASSES 어디에도 안 속함)
-      3. M101 OFF 됐는데 voting 못 끝낸 채 사이클 종료
-    """
-    global last_vision_result
-    print(f"  ⏰ [검출 실패] {reason} → 불량 ❌")
-    send_vision_result_to_plc(False)
-    _insert_robot_b_now(False, DEFECT_CLASS_NAME)
-    last_vision_result = {'vision_result': 'NG', 'defect_type': DEFECT_CLASS_NAME}
+    print(f"  💾 비전 결과 메모리 저장 — {ADDR_DONE_A}(공정 완료) 시 DB INSERT 예정 (현재: {vision_result})")
 
 
 def commit_defect_timeout():
-    """M101 ON 후 DEFECT_TIMEOUT 안에 양품 voting 미완료 → 불량 처리."""
-    _commit_detection_failure(f"{ADDR_PART_PRESENT} ON 후 {DEFECT_TIMEOUT}s 양품 판정 없음")
+    """M101 ON 후 DEFECT_TIMEOUT 안에 양품 voting 미완료 → 불량 판정 (voting 없이 직접).
+
+    차체조립에서 부품은 도착했는데(M101 ON) b/g/r 어느 것도 검출 못한 케이스.
+    M260 펄스 + 메모리 저장 → B_Process INSERT (NG, defect_type=DEFECT_CLASS_NAME).
+    commit_inspection_result(False, ...) 와 동일 효과지만 'voting 판정' 로그 대신
+    타임아웃 로그를 남겨 원인 추적이 쉬워짐.
+    """
+    global last_vision_result
+    print(f"  ⏰ [타임아웃 불량] {ADDR_PART_PRESENT} ON 후 {DEFECT_TIMEOUT}s 양품 판정 없음 → 불량 ❌")
+    send_vision_result_to_plc(False)   # 기존 M260 펄스 로직 재사용
+    last_vision_result = {
+        'vision_result': 'NG',
+        'defect_type': DEFECT_CLASS_NAME,
+    }
+    print(f"  💾 불량 결과 메모리 저장 — {ADDR_DONE_A}(공정 완료) 시 DB INSERT 예정 (defect_type={DEFECT_CLASS_NAME})")
 
 
 def execute_vision_inspection_manual(frame, conf_thresh):
@@ -698,15 +598,15 @@ def execute_vision_inspection_manual(frame, conf_thresh):
 # ═══════════════════════════════════════════════════════════════════════
 
 def monitor_plc_signals():
-    """M101(비전 트리거) + M101(부품 도착) [PLC 140] + M1130(공정 B 종료) [PLC 160] 폴링.
+    """B150(비전 트리거) + M101(부품 도착) + B1790(공정 A 종료) 폴링 — 모두 PLC 140.
 
-    M101 상승 엣지: 새 검사 사이클 시작 — trigger_on_time 갱신 + 잠금 해제
-    M101 하강 엣지: 검출 모드 종료 + 사이클 요약
+    B150 상승 엣지: 새 검사 사이클 시작 — trigger_on_time 갱신 + 잠금 해제
+    B150 하강 엣지: 검출 모드 종료 + 사이클 요약
     M101 상승 엣지: 불량 타임아웃 카운터 시작 (DEFECT_TIMEOUT 후 양품 없으면 M260)
     M101 하강 엣지: 불량 타임아웃 카운터 리셋 (부품 사라짐)
-    M1130 상승 엣지: B_Process INSERT (+ NG 면 finalize_defect_at_b)
+    B1790 상승 엣지: B_Process INSERT (+ NG 면 finalize_defect_at_b)
     """
-    global prev_vision_trigger, prev_done_b, prev_part_present
+    global prev_vision_trigger, prev_done_a, prev_part_present
     global trigger_on_time, result_sent_this_cycle, last_view_frame
     global last_vision_result, part_present_on_time
     global cycle_total_frames, cycle_detect_frames, cycle_class_counter
@@ -719,10 +619,10 @@ def monitor_plc_signals():
     # BG 폴링 스레드가 갱신한 캐시에서 read (O(1), 메인 루프 FPS 영향 X)
     with plc_cache_lock:
         curr_vision_trigger = plc_cache['vision_trigger']
-        curr_done_b = plc_cache['done_b']
+        curr_done_a = plc_cache['done_a']
         curr_part_present = plc_cache['part_present']
 
-    # ───── M101 상승 엣지 → 새 검사 사이클 시작 ─────
+    # ───── B150 상승 엣지 → 새 검사 사이클 시작 ─────
     if curr_vision_trigger and not prev_vision_trigger:
         trigger_on_time = time.time()
         result_sent_this_cycle = False
@@ -744,7 +644,7 @@ def monitor_plc_signals():
 
     # ───── M101 상승 엣지 → 불량 타임아웃 카운터 시작 ─────
     if curr_part_present and not prev_part_present:
-        # M101 ON 상태에서만 의미 있음. M101 OFF면 사이클 시작 시 다시 처리됨.
+        # B150 ON 상태에서만 의미 있음. B150 OFF면 사이클 시작 시 다시 처리됨.
         if curr_vision_trigger and not result_sent_this_cycle:
             part_present_on_time = time.time()
             print(f"  🟡 {ADDR_PART_PRESENT} ON — 부품 도착, 불량 타임아웃 {DEFECT_TIMEOUT}s 카운트 시작")
@@ -756,14 +656,11 @@ def monitor_plc_signals():
             print(f"  ⚫ {ADDR_PART_PRESENT} OFF — 타임아웃 카운터 리셋 (경과 {elapsed_pp:.2f}s)")
         part_present_on_time = 0.0
 
-    # ───── M101 하강 엣지 → 검출 모드 종료 + 사이클 요약 출력 ─────
+    # ───── B150 하강 엣지 → 검출 모드 종료 + 사이클 요약 출력 ─────
     if not curr_vision_trigger and prev_vision_trigger:
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🔴 {ADDR_VISION_TRIGGER} OFF — 추론 대기모드")
-        # 사이클 끝났는데 결과 못 보냈으면 → 검출 실패로 간주 → 불량 + release
-        if not result_sent_this_cycle and trigger_on_time > 0.0:
-            partial = f"voting 누적 {len(voting_buffer)}프레임" if voting_started_at > 0.0 else "voting 시작 못 함"
-            _commit_detection_failure(f"{ADDR_VISION_TRIGGER} OFF 시점에 결과 미확정 ({partial})")
-            result_sent_this_cycle = True
+        if voting_started_at > 0.0 and not result_sent_this_cycle:
+            print(f"  ⚠ voting 미완료 상태로 OFF — 누적 {len(voting_buffer)}프레임 폐기")
         voting_started_at = 0.0
         voting_buffer = []
         part_present_on_time = 0.0   # 사이클 종료 — 타임아웃 카운터도 해제
@@ -783,30 +680,61 @@ def monitor_plc_signals():
             print(f"  └" + "─" * 50)
         last_view_frame = None
 
-    # ───── M1130 상승 엣지 (PLC 160) → 공정 B 종료 로그 (INSERT 는 voting 시점에 이미 완료) ─────
-    if curr_done_b and not prev_done_b:
-        suffix = ""
-        if last_vision_result is not None:
-            suffix = f" — 최근 비전: {last_vision_result['vision_result']}"
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 공정 B 종료 신호 ({ADDR_DONE_B} ON, PLC 160){suffix}")
-        print(f"  ℹ DB INSERT 는 voting 시점에 즉시 처리됨 — 추가 동작 없음 (공정 C 동일 패턴)")
+    # ───── B1790 상승 엣지 (PLC 140) → 공정 A 종료 → B_Process INSERT ─────
+    # 양품 → B_Process INSERT 만 (종합 처리는 공정 C 가 담당)
+    # 불량 → B_Process INSERT + tbl_total NG + carrier_map RELEASE (C 로 안 넘어감)
+    if curr_done_a and not prev_done_a:
+        product_sn, tray_sn = get_latest_active_info()
+        sn_str = f"{product_sn} (Tray: {tray_sn})" if product_sn else "(ACTIVE S/N 없음)"
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 공정 A 종료 ({ADDR_DONE_A} ON, PLC 140) — {sn_str}")
+
+        if product_sn:
+            # 비전 결과로 INSERT (없으면 default 'OK' 로 양품 가정)
+            if last_vision_result is not None:
+                vr = last_vision_result['vision_result']
+                dt = last_vision_result.get('defect_type')
+            else:
+                vr, dt = 'OK', None
+                print(f"  ℹ 비전 결과 없음 — default OK 로 INSERT")
+
+            if record_robot_b_result(product_sn, tray_sn, vr, dt):
+                print(f"  ✅ B_Process INSERT: {product_sn} → {vr}")
+
+            # 양품/불량 분기
+            if vr == 'NG':
+                # 공정 B 불량 → C 로 안 넘어감 → B 에서 종합 처리 마무리
+                print(f"  ⚠ 불량 판정 — 공정 C 미진행 → B 에서 종합 처리")
+                final, ra, rb = finalize_defect_at_b(product_sn)
+                if final:
+                    print(f"  ✅ tbl_total INSERT (final={final}) + carrier_map RELEASE")
+                    print(f"     공정 A: {ra or '미실시'}, 공정 B: {rb}, 공정 C: 미실시")
+                else:
+                    print(f"  ❌ 종합 처리 실패 — carrier_map 수동 RELEASE 필요")
+            else:
+                # 양품 → C 로 넘어감 (C 의 M1120 이 최종 종합)
+                print(f"  ✓ 양품 — 공정 C 로 진행 (C 에서 최종 tbl_total + RELEASE)")
+
+            # 다음 사이클을 위해 비전 결과 정리
+            last_vision_result = None
+        else:
+            print(f"  ⚠ ACTIVE S/N 없음, INSERT 스킵")
 
     prev_vision_trigger = curr_vision_trigger
-    prev_done_b = curr_done_b
+    prev_done_a = curr_done_a
     prev_part_present = curr_part_present
 
 
 def vision_step(frame, conf_thresh):
-    """매 프레임 호출 — M101 ON 동안 안정화 후 Voting 누적 판정 (+ M101 타임아웃 불량).
+    """매 프레임 호출 — B150 ON 동안 안정화 후 Voting 누적 판정 (+ M101 타임아웃 불량).
 
     동작 흐름:
-      1) M101 OFF: 원본 프레임 + Standby 텍스트
-      2) M101 ON: IGNORE_DURATION 동안 안정화 표시 (추론 X)
+      1) B150 OFF: 원본 프레임 + Standby 텍스트
+      2) B150 ON: IGNORE_DURATION 동안 안정화 표시 (추론 X)
       3) 안정화 시간 경과 후 매 프레임 추론
       4) 첫 검출 발생 → voting 시작 (VOTING_DURATION s 카운트)
       5) voting 윈도우 동안 매 검출 결과를 voting_buffer 에 누적
       6) VOTING_DURATION 경과 → 다수결로 최종 클래스 결정 → PLC + 메모리 저장 (사이클당 1회)
-      7) result_sent_this_cycle=True 잠금 → M101 OFF→ON 시 해제
+      7) result_sent_this_cycle=True 잠금 → B150 OFF→ON 시 해제
 
     M101 타임아웃 (안전망):
       M101 ON 상태에서 DEFECT_TIMEOUT 안에 양품 voting 미완료 시 → 불량 판정 + M260.
@@ -817,7 +745,7 @@ def vision_step(frame, conf_thresh):
     global cycle_first_detect_at, cycle_last_detect_at
     global voting_started_at, voting_buffer
 
-    # M101 OFF 상태 — 대기 화면
+    # B150 OFF 상태 — 대기 화면
     if not prev_vision_trigger:
         view = frame.copy()
         cv2.putText(view, f"Standby [Thresh: {conf_thresh:.2f}]", (10, 30),
@@ -827,10 +755,9 @@ def vision_step(frame, conf_thresh):
 
     now = time.time()
 
-    # ─── M101 타임아웃 체크 — voting 시작 안 한 (검출 0건) 경우에만 발동 ───
-    # M101 ON 후 DEFECT_TIMEOUT 안에 양품 voting 시작도 못하면 불량.
-    # voting 이미 시작된 경우는 결과를 기다림 (검출 진행 중이므로 타임아웃 무시).
-    if not result_sent_this_cycle and part_present_on_time > 0.0 and voting_started_at == 0.0:
+    # ─── M101 타임아웃 체크 — 안정화/voting 단계와 독립 ───
+    # M101 ON 후 DEFECT_TIMEOUT 안에 양품 판정 없으면 즉시 불량 처리.
+    if not result_sent_this_cycle and part_present_on_time > 0.0:
         pp_elapsed = now - part_present_on_time
         if pp_elapsed >= DEFECT_TIMEOUT:
             commit_defect_timeout()
@@ -911,12 +838,15 @@ def vision_step(frame, conf_thresh):
                 print(f"     → 채택: {best_class} ({best_count}/{total}={ratio:.0f}%, 평균 conf={avg_conf:.2f})")
 
                 if best_class in NORMAL_CLASSES:
-                    commit_inspection_result(True, best_class)
+                    is_normal = True
                 elif best_class in CRACK_CLASSES:
-                    commit_inspection_result(False, best_class)
+                    is_normal = False
                 else:
-                    # 알 수 없는 클래스 → 검출 실패로 간주 → 불량 + release
-                    _commit_detection_failure(f"알 수 없는 클래스 채택({best_class})")
+                    is_normal = None
+                    print(f"  ⚠ 알 수 없는 클래스: {best_class} — PLC/메모리 송신 스킵")
+
+                if is_normal is not None:
+                    commit_inspection_result(is_normal, best_class)
                 result_sent_this_cycle = True
 
 
@@ -932,84 +862,18 @@ cv2.createTrackbar(TRACKBAR_NAME, WINDOW_NAME,
 
 load_yolo_model()
 connect_plc()
-connect_plc_monitor()
 
-# PLC 백그라운드 폴링 스레드 시작 — PLC 별로 분리해 한쪽이 느려도 다른쪽 영향 X
+# PLC 백그라운드 폴링 스레드 시작 — PLC 140 단일 접속으로 3비트(B150/M101/B1790) 통합 폴링
 plc_poll_thread_140 = threading.Thread(target=plc_polling_loop_140, name='plc-poll-140', daemon=True)
-plc_poll_thread_160 = threading.Thread(target=plc_polling_loop_160, name='plc-poll-160', daemon=True)
 plc_poll_thread_140.start()
-plc_poll_thread_160.start()
-print(f"✅ PLC 백그라운드 폴링 스레드 시작 (PLC 140 / PLC 160 각 별도, 목표 {1.0/PLC_POLL_TARGET_INTERVAL:.0f}Hz)")
+print(f"✅ PLC 140 백그라운드 폴링 스레드 시작 (목표 {1.0/PLC_POLL_TARGET_INTERVAL:.0f}Hz)")
 
-def _open_camera(index):
-    """카메라 열기 — MJPG 시도 후 안 되면 YUY2 fallback (해상도 640x480 으로 낮춰서 대역폭 확보).
-
-    카메라가 MJPG 지원하면: 1280x720 @ 30fps (압축 송출, USB 2.0 여유)
-    MJPG 미지원이면: 640x480 YUY2 @ 30fps (대역폭 ~28MB/s, USB 2.0 한계 안에 들어옴)
-    YOLO 가 내부적으로 640 으로 리사이즈하므로 480p 라도 정확도 손실 거의 없음.
-    """
-    backend, backend_name = cv2.CAP_DSHOW, 'CAP_DSHOW'
-    c = cv2.VideoCapture(index, backend)
-    if not c.isOpened():
-        return c
-
-    # 1차 시도: MJPG 1280x720
-    c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-    c.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    c.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    c.set(cv2.CAP_PROP_FPS, 30)
-    c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    fcc = int(c.get(cv2.CAP_PROP_FOURCC))
-    fcc_str = bytes([(fcc >> 8*i) & 0xFF for i in range(4)]).decode('ascii', errors='replace')
-    w = int(c.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(c.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    if fcc_str == 'MJPG':
-        print(f"[INFO] 카메라: {w}x{h} @ MJPG ({backend_name}) — 압축 송출 성공")
-        return c
-
-    # 2차 시도: YUY2 640x480 (해상도 낮춰서 USB 대역폭 확보)
-    print(f"[INFO] MJPG 미지원 (현재 fourcc={fcc_str}) — 640x480 YUY2 로 폴백")
-    c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    c.set(cv2.CAP_PROP_FPS, 30)
-    w = int(c.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(c.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[INFO] 카메라: {w}x{h} @ YUY2 ({backend_name})")
-    return c
-
-cap = _open_camera(CAMERA_INDEX)
+cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 if not cap.isOpened():
     print(f"\n[FATAL] 카메라(인덱스 {CAMERA_INDEX}) 초기화 실패 — 종료합니다.")
     raise SystemExit(1)
-
-# ─────────────────────────────────────────────────────────────
-# 카메라 캡처 백그라운드 스레드 — 메인 루프가 cap.read() 대기로 막히지 않게 분리.
-# 카메라 자체 fps(~8fps) 가 USB/광량 때문에 낮아도 메인 루프는 30fps+ 부드럽게 동작.
-# frame_id 를 함께 갱신하여 메인 루프가 "새 프레임인지" 구분 가능 → 같은 프레임 중복 YOLO 추론 방지.
-# ─────────────────────────────────────────────────────────────
-camera_frame_lock = threading.Lock()
-latest_camera_frame = None
-camera_frame_id = 0
-camera_thread_stop = threading.Event()
-
-def camera_capture_loop():
-    """카메라 read 를 무한 루프로 돌리며 최신 프레임을 latest_camera_frame 에 저장."""
-    global latest_camera_frame, camera_frame_id
-    while not camera_thread_stop.is_set():
-        ret, frame = cap.read()
-        if not ret:
-            # 일시적 read 실패 — 짧게 쉬고 재시도
-            camera_thread_stop.wait(0.01)
-            continue
-        with camera_frame_lock:
-            latest_camera_frame = frame
-            camera_frame_id += 1
-
-camera_thread = threading.Thread(target=camera_capture_loop, name='camera-capture', daemon=True)
-camera_thread.start()
-print(f"✅ 카메라 캡처 백그라운드 스레드 시작 — 메인 루프와 카메라 read 분리")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1025,7 +889,7 @@ print(f"      └─ 첫 검출 발생 → {VOTING_DURATION}s 동안 결과 누�
 print(f"      └─ 다수결로 클래스 채택 → 양품(M250) / 불량(M260) 통보 + 메모리 저장")
 print(f"      └─ 사이클당 1회 송신 (재트리거: {ADDR_VISION_TRIGGER} OFF→ON)")
 print(f"    {ADDR_PART_PRESENT} ON → {DEFECT_TIMEOUT}s 안에 양품 미검출 시 → 불량(M260, defect_type={DEFECT_CLASS_NAME})")
-print(f"    {ADDR_DONE_B} 감지 → B_Process INSERT (NG 면 finalize_defect_at_b)")
+print(f"    {ADDR_DONE_A} 감지 → B_Process INSERT (NG 면 finalize_defect_at_b)")
 print("")
 print("  [수동 제어]")
 print("    V  : 비전 검사 수동 실행 (PLC 우회, 디버그)")
@@ -1037,8 +901,7 @@ print("    ※ 화면 상단 트랙바로 conf 임계값 실시간 조정 가능
 print("=" * 60)
 print("")
 print(f"  [DB 서버] {DB_CONFIG['host']}:{DB_CONFIG['port']}")
-print(f"  [PLC]     {PLC_IP}:{PLC_PORT} (공정 B 메인)")
-print(f"  [PLC 관제] {PLC_MONITOR_IP}:{PLC_PORT} (종료 신호 폴링)")
+print(f"  [PLC]     {PLC_IP}:{PLC_PORT} (공정 B 메인 — 3비트 통합 폴링)")
 print(f"  [카메라]  cv2.VideoCapture(index={CAMERA_INDEX}, rotation={CAMERA_ROTATION})")
 print(f"  [로봇 B]  PLC 자체 제어 — 펜던트 IF")
 print("")
@@ -1047,7 +910,7 @@ print(f"    {ADDR_VISION_TRIGGER}     : 비전 트리거 (공정 A PLC 150 ← B
 print(f"    {ADDR_PART_PRESENT}     : 부품 도착 (PLC 140 → Vision, 불량 타임아웃 기준)")
 print(f"    {ADDR_NORMAL}      : 양품 통보 (Vision → PLC 140)")
 print(f"    {ADDR_CRACK}      : 불량 통보 (Vision → PLC 140)")
-print(f"    {ADDR_DONE_B}  : 공정 B 종료 (PLC 160 → Vision)")
+print(f"    {ADDR_DONE_A}  : 공정 A 종료 (PLC 140 B-디바이스 → Vision)")
 print("")
 print("  [로봇 제어 방식]")
 print("    CC-Link → PLC 자체 센서/래더 → 펜던트 IF (공정 A/C 와 동일)")
@@ -1067,27 +930,13 @@ print("")
 # 메인 루프
 # ═══════════════════════════════════════════════════════════════════════
 
-last_processed_frame_id = -1
 try:
     while True:
-        # ── [구간1] 최신 카메라 프레임 (BG 스레드 갱신본) 가져오기 ──
+        # ── [구간1] 카메라 캡처 + 회전 보정 ──
         _t0 = time.time()
-        with camera_frame_lock:
-            current_frame_id = camera_frame_id
-            frame_snapshot = latest_camera_frame
-        if frame_snapshot is None:
-            # 카메라가 아직 첫 프레임 못 만듦 — 잠깐 대기
-            cv2.waitKey(1)
-            continue
-        if current_frame_id == last_processed_frame_id:
-            # 새 프레임 없음 — UI 만 갱신해서 창 응답성 유지, YOLO/voting 건너뜀
-            if last_view_frame is not None:
-                cv2.imshow(WINDOW_NAME, last_view_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-            continue
-        last_processed_frame_id = current_frame_id
-        frame = frame_snapshot.copy()
+        ret, frame = cap.read()
+        if not ret:
+            break
         if CAMERA_ROTATION is not None:
             frame = cv2.rotate(frame, CAMERA_ROTATION)
         _t1 = time.time()
@@ -1138,17 +987,12 @@ try:
 
             with plc_poll_diag_lock:
                 bg_t_count = plc_poll_diag['trigger_count']
-                bg_d_count = plc_poll_diag['done_count']
                 bg_t_avg = plc_poll_diag['trigger_total_ms'] / max(1, bg_t_count)
-                bg_d_avg = plc_poll_diag['done_total_ms'] / max(1, bg_d_count)
                 plc_poll_diag['trigger_total_ms'] = 0.0
                 plc_poll_diag['trigger_count'] = 0
-                plc_poll_diag['done_total_ms'] = 0.0
-                plc_poll_diag['done_count'] = 0
 
             print(f"  [timing] " + " | ".join(parts) + f"  (프레임 {section_counts['capture']}장)")
-            print(f"  [plc-bg] PLC140(M101+M101)={bg_t_avg:.1f}ms × {bg_t_count}/s"
-                  f" | PLC160({ADDR_DONE_B})={bg_d_avg:.1f}ms × {bg_d_count}/s")
+            print(f"  [plc-bg] PLC140 3비트(B150+M101+B1790)={bg_t_avg:.1f}ms × {bg_t_count}/s")
 
             for k in section_times:
                 section_times[k] = 0.0
@@ -1167,40 +1011,25 @@ try:
                 cv2.destroyWindow('Vision Result')
         elif key == ord('1'):
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🟢 [수동] {ADDR_VISION_TRIGGER} ON")
-            set_vision_trigger(1)
+            set_b150(1)
         elif key == ord('0'):
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🔴 [수동] {ADDR_VISION_TRIGGER} OFF")
-            set_vision_trigger(0)
+            set_b150(0)
         elif key == ord('s'):
             show_active_status()
-
-        # X 버튼으로 창 닫힘 감지 → 깔끔하게 루프 종료
-        try:
-            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-                break
-        except cv2.error:
-            break
 
 finally:
     # ═══════════════════════════════════════════════════════════════════════
     # 종료
     # ═══════════════════════════════════════════════════════════════════════
     print("\n[INFO] 프로그램을 안전하게 종료합니다.")
-    # 카메라 캡처 스레드 먼저 정지 (cap.release 전에)
-    camera_thread_stop.set()
-    try:
-        camera_thread.join(timeout=2.0)
-        print("  카메라 캡처 스레드 종료")
-    except Exception:
-        pass
     # BG 폴링 스레드 정리 (PLC 소켓 종료 전에)
     plc_thread_stop.set()
-    for _t in (plc_poll_thread_140, plc_poll_thread_160):
-        try:
-            _t.join(timeout=3.0)
-        except Exception:
-            pass
-    print("  PLC 폴링 스레드 종료 (140 / 160)")
+    try:
+        plc_poll_thread_140.join(timeout=3.0)
+    except Exception:
+        pass
+    print("  PLC 140 폴링 스레드 종료")
     try:
         cap.release()
     except Exception:
@@ -1211,13 +1040,6 @@ finally:
         try:
             plc.close()
             print("  PLC (140) 연결 종료")
-        except Exception:
-            pass
-
-    if plc_monitor:
-        try:
-            plc_monitor.close()
-            print("  관제 PLC (160) 연결 종료")
         except Exception:
             pass
 
